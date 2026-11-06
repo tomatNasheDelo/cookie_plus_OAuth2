@@ -1,0 +1,37 @@
+{
+  "realm": "cookie-lab",
+  "enabled": true,
+  "displayName": "Cookie Lab Local",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "clients": [
+    {
+      "clientId": "cookie-lab-bff",
+      "name": "Cookie Lab Backend BFF",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "local-client-secret-change-in-production",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["http://localhost:8080/login/oauth2/code/keycloak"],
+      "webOrigins": ["http://localhost:5173"],
+      "defaultClientScopes": ["profile", "email", "roles", "web-origins"]
+    }
+  ],
+  "users": [
+    {
+      "username": "student",
+      "enabled": true,
+      "email": "student@example.test",
+      "emailVerified": true,
+      "firstName": "Cookie",
+      "lastName": "Student",
+      "credentials": [{"type": "password", "value": "student-local-only", "temporary": false}],
+      "realmRoles": ["default-roles-cookie-lab"]
+    }
+  ]
+}

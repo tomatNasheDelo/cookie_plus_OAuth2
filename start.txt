@@ -1,0 +1,144 @@
+Детальная инструкция — Cookie + OAuth2/OIDC + Refresh + CSRF
+============================================================
+
+Назначение и архитектура
+------------------------
+
+React + TypeScript + Vite 7 — интерфейс. Kotlin + Spring Boot — backend-for-frontend (BFF). Keycloak — локальный OpenID Connect Identity Provider. База данных не используется.
+
+Браузер → React → Spring Boot BFF → Keycloak (OIDC login/token endpoints)
+                         ├─ LABSESSION HttpOnly cookie (браузер хранит только ID сессии)
+                         ├─ OAuth access/refresh tokens (хранятся backend, не выдаются React)
+                         └─ Spring Security CSRF filter проверяет state-changing POST
+
+Внешний OIDC provider подтверждает личность пользователя. Это OIDC login поверх OAuth 2.0 Authorization Code flow, а не самодельная форма, собирающая пароль. Backend хранит OAuth2AuthorizedClient в памяти процесса; после рестарта backend он пропадёт — это упрощение учебного стенда.
+
+Компоненты проекта
+------------------
+
+frontend/src/App.tsx — запускает redirect на /oauth2/authorization/keycloak, показывает сессию, вызывает CSRF защищённый POST и endpoint для проверки OAuth authorized client. OAuth token никогда не запрашивается из React.
+frontend/src/App.tsx — fetch использует credentials: include, чтобы браузер автоматически отправлял session cookie.
+frontend/vite.config.ts — локальный proxy для /api, /oauth2 и /login на backend.
+frontend/.env.example — VITE_API_URL для Cloudflare Pages. Любая VITE_* переменная попадёт в публичный bundle, поэтому там толь��о URL, не client secret.
+backend/src/main/resources/application.yml — Spring Security OAuth2 client registration, OIDC issuer, client id/secret, callback URL и cookie настройки.
+backend/.../SecurityConfig.kt — OAuth2 login, CSRF cookie repository, CORS, logout и OAuth2AuthorizedClientManager с refreshToken provider.
+backend/.../DemoController.kt — /api/csrf, /api/me, /api/oauth/refresh-check и защищаемый POST /api/demo/change-state.
+keycloak/realm-cookie-lab.json — локальный realm, confidential OIDC client и тестовый пользователь.
+backend/.env.example — шаблон backend настройки. Spring Boot не читает .env автоматически; экспортируй переменные в shell или добавь в hosting Environment settings.
+
+OAuth2/OIDC вход
+----------------
+
+1. React переходит на backend /oauth2/authorization/keycloak.
+2. Spring создаёт OAuth authorization request/state и перенаправляет браузер к Keycloak.
+3. Пользователь вводит учётные данные у Keycloak, не в React.
+4. Provider возвращает браузер на backend redirect URI /login/oauth2/code/keycloak с authorization code.
+5. Backend обменивает code на tokens напрямую с provider, проверяет OIDC ответ и создаёт серверную authenticated session.
+6. Браузер получает HttpOnly cookie LABSESSION. OAuth access/refresh tokens остаются backend-side.
+
+Для production callback должен в точности совпадать с redirect URI, зарегистрированным у identity provider: https://<backend-host>/login/oauth2/code/keycloak. Не отправляй client secret или tokens в frontend.
+
+Refresh token
+-------------
+
+Spring OAuth2AuthorizedClientManager настроен с authorizationCode() и refreshToken() provider. Endpoint GET /api/oauth/refresh-check вызывает manager для текущего пользователя. Если access token истёк и provider выдал refresh token, Spring обращается к token endpoint и обновляет authorized client. Пока access token ещё действителен, повторный вызов не обязан вызывать refresh. Endpoint не возвращает bearer token, только expiry и факт наличия refresh token.
+
+Локальный Keycloak realm в этом примере выдаёт обычный refresh token вместе с authorization code flow. Refresh token — credential, хранить и использовать его должен backend. Не помещай его в localStorage, React state, URL или логи. Для долгой работы в production настрой refresh-token rotation/expiry и backend authorized-client persistence.
+
+CSRF
+----
+
+Браузер автоматически прикладывает session cookie к запросам. Злоумышленная страница может попытаться инициировать запрос от имени вошедшего пользователя — это CSRF риск. Spring Security применяет CSRF protection к изменяющим запросам.
+
+GET /api/csrf возвращает token в JSON и выставляет XSRF-TOKEN cookie. React хранит token в памяти и передаёт его в заголовке X-XSRF-TOKEN для POST. Backend проверяет заголовок и cookie до попадания запроса в controller. GET /api/demo/change-state не меняет состояние; endpoint POST демонстрирует требование CSRF. Logout — тоже POST и также защищён.
+
+CSRF token не является OAuth token или паролем. CORS не заменяет CSRF defense. Не отключай CSRF для session-authenticated endpoints.
+
+Локальный запуск
+----------------
+
+Требуются Docker + Compose, JDK 17+, Gradle 8.10+, Node.js 20.19+ либо 22.12+.
+
+Терминал 1 — запустить Keycloak и импортировать realm:
+
+  docker compose up -d keycloak
+
+Первый запуск Keycloak может занять минуту. Admin console: http://localhost:8180, admin user admin, password admin-local-only (локальный стенд).
+
+Терминал 2 — backend:
+
+  cd backend
+  gradle bootRun
+
+Терминал 3 — frontend:
+
+  cd frontend
+  npm install
+  npm run dev
+
+Открой http://localhost:5173 и нажми «Войти через OpenID Connect». Тестовый пользователь: student / student-local-only. После входа попробуй проверить Session, CSRF POST и refresh endpoint. В DevTools → Application/Storage → Cookies проверь HttpOnly у LABSESSION; document.cookie её не покажет.
+
+Если Keycloak ещё импортирует realm, подожди и повтори вход. Если realm/client менялись, пересоздай контейнер (realm import выполняется в пустой realm): docker compose down -v затем docker compose up -d keycloak. Команда с -v удаляет локальное состояние Keycloak.
+
+Остановка: Ctrl+C у Gradle/Vite процессов; для Keycloak:
+
+  docker compose down
+
+Локальные URLs и endpoints
+--------------------------
+
+Frontend: http://localhost:5173
+Backend: http://localhost:8080
+Keycloak: http://localhost:8180/realms/cookie-lab
+
+GET  /api/me — текущая OIDC session, публичный ответ сообщает только authenticated/name/email.
+GET  /api/csrf — получить CSRF token для текущего browser session.
+GET  /api/oauth/refresh-check — authenticated; попросить Spring проверить/обновить access token.
+POST /api/demo/change-state — требует валидную CSRF cookie + X-XSRF-TOKEN header.
+POST /api/logout — требует CSRF token и завершает локальную Spring session.
+GET  /oauth2/authorization/keycloak — начать OIDC login.
+
+Сравнение с предыдущими проектами
+---------------------------------
+
+Это BFF session модель: browser предъявляет HttpOnly session cookie backend; OAuth tokens остаются на сервере. В предыдущем простом JWT demo bearer token передавался из React. В Session/JWT/mTLS версии mTLS относился к service-to-service transport, а не к browser login. Здесь добавлены настоящий OIDC provider, OAuth2 authorization-code flow, server-side authorized client / refresh, CSRF защита.
+
+Cloudflare Pages + Render
+-------------------------
+
+Cloudflare Pages:
+- Root directory: frontend
+- Build command: npm run build
+- Output directory: dist
+- Environment variable VITE_API_URL=https://<your-backend>.onrender.com (без завершающего slash)
+- Пересобери frontend после изменения переменной. Она публична, секреты туда не добавляй.
+
+Render backend Web Service:
+- Root directory: backend, Dockerfile runtime (backend/Dockerfile)
+- APP_FRONTEND_URL=https://<your-project>.pages.dev
+- CORS_ALLOWED_ORIGINS=https://<your-project>.pages.dev (точный origin без пути)
+- OIDC_ISSUER_URI=https://<public-identity-provider>/realms/<realm>
+- OIDC_CLIENT_ID=<confidential-client-id>
+- OIDC_CLIENT_SECRET=<secret из панели OIDC provider>
+- SESSION_COOKIE_SECURE=true
+- SESSION_COOKIE_SAME_SITE=None, если frontend/backend действительно cross-site
+- SERVER_PORT: Render обычно предоставляет PORT; согласуй SERVER_PORT с портом Web Service (default приложения 8080).
+
+Файл .env.example — только образец, Cloudflare/Render его автоматически не читают. Добавь переменные в настройках окружения. Client secret — только в backend environment, никогда в frontend.
+
+OIDC provider должен разрешать точный callback https://<backend-domain>/login/oauth2/code/keycloak и redirect пользователя после login на frontend origin. Обнови redirect URI/web origin у клиента в provider. Используй HTTPS issuer URL и публично доступный discovery endpoint.
+
+Важно о доменах: *.pages.dev и *.onrender.com — разные sites. Для session cookie через такой cross-site fetch нужны SameSite=None; Secure и credentials: include, но браузерные настройки могут блокировать third-party cookies. CORS не может это отменить. Для надёжного опыта используй собственные app.example.com/api.example.com домены одного registrable domain или reverse proxy с одним origin. OAuth login redirect сам по себе работает, но последующие API вызовы зависят от cookie policy.
+
+Production ограничения и безопасность
+-------------------------------------
+
+Локальный realm/client secret/password/admin password — учебные и слабые; не повторяй их. Используй внешний managed OIDC provider или отдельно защищённый Keycloak, строгий redirect URI allowlist, HTTPS, сильные секреты из secret manager.
+
+Default OAuth2AuthorizedClientService хранит tokens в памяти. Для нескольких backend инстансов/перезапусков настрой защищённое persistent storage и encryption-at-rest. Учитывай refresh token rotation и конкурентные refresh операции.
+
+Spring session по умолчанию в этом демо локальная/in-memory. Для масштабирования используй Spring Session с надёжным хранилищем, TLS, session fixation protection (Spring Security защищает по умолчанию), короткую разумную сессию и logout/revocation.
+
+CSRF токен не заменяет XSS защиту. Не вставляй untrusted HTML, включи CSP и безопасное кодирование. Оставь CSRF включённым для cookie-authenticated endpoints. Для state-changing API дополнительно продумай Origin/Referer checks и SameSite.
+
+Не логируй authorization code, access/refresh token, session id, client secret или CSRF token. Не включай wildcard CORS вместе с credentials. Не публикуй Keycloak admin endpoint без защиты. Этот проект — демонстрация протокольного потока, а не готовая production система авторизации.
